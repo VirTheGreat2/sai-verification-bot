@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Custom SQLite Database Files
+*.db
+*.sqlite
+
+# Optional: Sensitive test images containing private student data
+# reference_sai.jpg
