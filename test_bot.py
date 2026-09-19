@@ -3,8 +3,19 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import os
 import discord
 import bot
+import database
 
 class TestBot(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        database.DB_NAME = "test_bot_verified_students.db"
+        if os.path.exists(database.DB_NAME):
+            os.remove(database.DB_NAME)
+        database.init_db()
+
+    def tearDown(self) -> None:
+        if os.path.exists(database.DB_NAME):
+            os.remove(database.DB_NAME)
+
     @patch("database.init_db")
     @patch("discord.app_commands.CommandTree.sync")
     async def test_setup_hook(self, mock_sync: AsyncMock, mock_init_db: MagicMock) -> None:
@@ -107,6 +118,34 @@ class TestBot(unittest.IsolatedAsyncioTestCase):
         
         # Clean up
         bot.bot.processing_users.discard(999)
+
+    async def test_on_message_producer_queues_message(self) -> None:
+        mock_message = AsyncMock(spec=discord.Message)
+        mock_message.author = MagicMock()
+        mock_message.author.bot = False
+        mock_message.author.id = 888
+        mock_message.guild = None
+        
+        mock_attachment = MagicMock()
+        mock_attachment.content_type = "image/png"
+        mock_attachment.size = 1000
+        mock_message.attachments = [mock_attachment]
+        
+        await bot.on_message(mock_message)
+        
+        self.assertIn(888, bot.bot.processing_users)
+        self.assertEqual(bot.verification_queue.qsize(), 1)
+        
+        queued_item = bot.verification_queue.get_nowait()
+        self.assertEqual(queued_item, mock_message)
+        bot.verification_queue.task_done()
+        
+        mock_message.reply.assert_called_with(
+            "⏳ Added to the verification queue! You are currently position: 1."
+        )
+        
+        # Clean up
+        bot.bot.processing_users.discard(888)
 
 if __name__ == "__main__":
     unittest.main()

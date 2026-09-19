@@ -76,5 +76,32 @@ class TestDatabase(unittest.TestCase):
         state = database.get_user_state("nonexistent")
         self.assertIsNone(state)
 
+    def test_hash_student_id(self) -> None:
+        # Test None returns None
+        self.assertIsNone(database.hash_student_id(None))
+        
+        # Test hashing strips whitespace, uppercases, and hashes correctly
+        raw_id = "  student123  "
+        expected_hash = "3a1cb5493820e13cfc3a40327968d0eaaa92135f9b48e785cc061601420ccc86" # SHA-256 of "STUDENT123"
+        self.assertEqual(database.hash_student_id(raw_id), expected_hash)
+
+    def test_database_stores_hashed_student_id(self) -> None:
+        raw_id = "student456"
+        expected_hash = database.hash_student_id(raw_id)
+        
+        database.add_verified_user("discord123", raw_id)
+        
+        # Query directly from database to verify cleartext is NOT stored
+        with sqlite3.connect(database.DB_NAME) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT student_id FROM users WHERE discord_id = ?", ("discord123",))
+            row = cursor.fetchone()
+            self.assertIsNotNone(row)
+            stored_student_id = row[0]
+            
+            # Verify that stored student_id is hashed and matches the expected hash
+            self.assertEqual(stored_student_id, expected_hash)
+            self.assertNotEqual(stored_student_id, raw_id)
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,20 @@
 import sqlite3
+import hashlib
 from typing import Optional, Tuple
 
 DB_NAME = "verified_students.db"
+
+def hash_student_id(raw_id: Optional[str]) -> Optional[str]:
+    """
+    Hashes student ID using SHA-256 to avoid storing PII.
+    Strips any whitespace, converts to uppercase (for uniformity),
+    and returns hashlib.sha256(raw_id.encode('utf-8')).hexdigest().
+    If raw_id is None, returns None.
+    """
+    if raw_id is None:
+        return None
+    raw_id = raw_id.strip().upper()
+    return hashlib.sha256(raw_id.encode('utf-8')).hexdigest()
 
 def init_db() -> None:
     """
@@ -33,6 +46,7 @@ def add_verified_user(discord_id: str, student_id: str) -> None:
     Saves a successful verification.
     Inserts a new record or updates student_id and resets strikes/is_locked if re-verifying.
     """
+    hashed_id = hash_student_id(student_id)
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -41,7 +55,7 @@ def add_verified_user(discord_id: str, student_id: str) -> None:
             ON CONFLICT(discord_id) DO UPDATE SET
                 student_id = excluded.student_id,
                 timestamp = CURRENT_TIMESTAMP
-        """, (discord_id, student_id))
+        """, (discord_id, hashed_id))
         conn.commit()
 
 def is_student_id_used(student_id: str) -> bool:
@@ -51,9 +65,10 @@ def is_student_id_used(student_id: str) -> bool:
     """
     if not student_id:
         return False
+    hashed_id = hash_student_id(student_id)
     with sqlite3.connect(DB_NAME) as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT discord_id FROM users WHERE student_id = ?", (student_id,))
+        cursor.execute("SELECT discord_id FROM users WHERE student_id = ?", (hashed_id,))
         row = cursor.fetchone()
         return row is not None
 

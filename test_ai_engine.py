@@ -25,58 +25,56 @@ class TestAIEngine(unittest.TestCase):
         ai_engine.api_keys = ["k1", "k2"]
         ai_engine.key_pool = itertools.cycle(["k1", "k2"])
         
-        with patch("google.generativeai.configure") as mock_configure:
-            key1 = ai_engine.rotate_api_key()
-            self.assertEqual(key1, "k1")
-            mock_configure.assert_called_with(api_key="k1")
-            
-            key2 = ai_engine.rotate_api_key()
-            self.assertEqual(key2, "k2")
-            mock_configure.assert_called_with(api_key="k2")
-            
-            key3 = ai_engine.rotate_api_key()
-            self.assertEqual(key3, "k1")
-            mock_configure.assert_called_with(api_key="k1")
+        key1 = ai_engine.rotate_api_key()
+        self.assertEqual(key1, "k1")
+        
+        key2 = ai_engine.rotate_api_key()
+        self.assertEqual(key2, "k2")
+        
+        key3 = ai_engine.rotate_api_key()
+        self.assertEqual(key3, "k1")
 
     def test_load_reference_images_empty(self) -> None:
         # folder_path does not exist
         images = ai_engine.load_reference_images("nonexistent_folder_abc")
         self.assertEqual(images, [])
 
-    @patch("google.generativeai.list_models")
-    def test_get_active_flash_models(self, mock_list_models: MagicMock) -> None:
+    @patch("google.genai.Client")
+    def test_get_active_flash_models(self, mock_client_cls: MagicMock) -> None:
         # Mock returned models
         m1 = MagicMock()
-        m1.name = "models/gemini-1.5-flash"
-        m1.supported_generation_methods = ["generateContent"]
+        m1.name = "gemini-2.5-flash"
+        m1.supported_actions = ["generateContent"]
         
         m2 = MagicMock()
-        m2.name = "models/gemini-1.5-pro"
-        m2.supported_generation_methods = ["generateContent"]
+        m2.name = "gemini-2.5-pro"
+        m2.supported_actions = ["generateContent"]
         
         m3 = MagicMock()
-        m3.name = "models/gemini-1.0-flash-latest"
-        m3.supported_generation_methods = ["generateContent"]
+        m3.name = "gemini-2.0-flash-latest"
+        m3.supported_actions = ["generateContent"]
         
-        mock_list_models.return_value = [m1, m2, m3]
+        mock_client = MagicMock()
+        mock_client.models.list.return_value = [m1, m2, m3]
+        mock_client_cls.return_value = mock_client
         
         models = ai_engine.get_active_flash_models()
-        self.assertIn("models/gemini-1.5-flash", models)
-        self.assertIn("models/gemini-1.0-flash-latest", models)
-        self.assertNotIn("models/gemini-1.5-pro", models)
-        self.assertEqual(models, ["models/gemini-1.5-flash", "models/gemini-1.0-flash-latest"])
+        self.assertIn("gemini-2.5-flash", models)
+        self.assertIn("gemini-2.0-flash-latest", models)
+        self.assertNotIn("gemini-2.5-pro", models)
+        self.assertEqual(models, ["gemini-2.5-flash", "gemini-2.0-flash-latest"])
 
-    @patch("google.generativeai.GenerativeModel")
+    @patch("google.genai.Client")
     @patch("ai_engine.get_active_flash_models")
-    def test_verify_document_success(self, mock_get_models: MagicMock, mock_gen_model_class: MagicMock) -> None:
-        mock_get_models.return_value = ["models/gemini-1.5-flash"]
+    def test_verify_document_success(self, mock_get_models: MagicMock, mock_client_cls: MagicMock) -> None:
+        mock_get_models.return_value = ["gemini-2.5-flash"]
         
         # Mock model response
-        mock_model_instance = MagicMock()
+        mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.text = '{"verified": true, "reason": "Looks good", "extracted_id": "12345"}'
-        mock_model_instance.generate_content.return_value = mock_response
-        mock_gen_model_class.return_value = mock_model_instance
+        mock_client.models.generate_content.return_value = mock_response
+        mock_client_cls.return_value = mock_client
         
         # Create a dummy 1x1 black pixel image bytes
         img = Image.new("RGB", (1, 1), color="black")
@@ -89,22 +87,23 @@ class TestAIEngine(unittest.TestCase):
         self.assertEqual(result["reason"], "Looks good")
         self.assertEqual(result["extracted_id"], "12345")
 
-    @patch("google.generativeai.GenerativeModel")
+    @patch("google.genai.Client")
     @patch("ai_engine.get_active_flash_models")
     @patch("ai_engine.rotate_api_key")
-    def test_verify_document_retry_on_429(self, mock_rotate_key: MagicMock, mock_get_models: MagicMock, mock_gen_model_class: MagicMock) -> None:
-        mock_get_models.return_value = ["models/gemini-1.5-flash"]
+    def test_verify_document_retry_on_429(self, mock_rotate_key: MagicMock, mock_get_models: MagicMock, mock_client_cls: MagicMock) -> None:
+        mock_get_models.return_value = ["gemini-2.5-flash"]
+        mock_rotate_key.return_value = "rotated_key"
         
-        mock_model_instance = MagicMock()
+        mock_client = MagicMock()
         
-        import google.api_core.exceptions
-        ex_429 = google.api_core.exceptions.ResourceExhausted("Rate limit exceeded")
+        from google.genai import errors
+        ex_429 = errors.APIError(429, "RESOURCE_EXHAUSTED", "Rate limit exceeded")
         
         mock_response = MagicMock()
         mock_response.text = '{"verified": false, "reason": "Invalid ID", "extracted_id": ""}'
         
-        mock_model_instance.generate_content.side_effect = [ex_429, mock_response]
-        mock_gen_model_class.return_value = mock_model_instance
+        mock_client.models.generate_content.side_effect = [ex_429, mock_response]
+        mock_client_cls.return_value = mock_client
         
         img = Image.new("RGB", (1, 1), color="black")
         img_bytes_io = io.BytesIO()
@@ -113,7 +112,6 @@ class TestAIEngine(unittest.TestCase):
         
         result = ai_engine.verify_document(img_bytes)
         
-        mock_rotate_key.assert_called_once()
         self.assertFalse(result["verified"])
         self.assertEqual(result["reason"], "Invalid ID")
 

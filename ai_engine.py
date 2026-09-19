@@ -3,8 +3,8 @@ import io
 import json
 import itertools
 from PIL import Image
-import google.generativeai as genai
-import google.api_core.exceptions
+from google import genai
+from google.genai import types, errors
 from typing import List, Optional, Tuple, Any
 
 def load_env_keys(file_path: str = ".env") -> List[str]:
@@ -37,21 +37,16 @@ key_pool = itertools.cycle(api_keys) if api_keys else None
 
 def rotate_api_key() -> Optional[str]:
     """
-    Switches to the next API key in the cycle pool and configures genai.
+    Switches to the next API key in the cycle pool and returns it.
     Returns the selected API key, or None if no keys are available.
     """
     if not key_pool:
         single_key = os.environ.get("GEMINI_API_KEY")
         if single_key:
-            genai.configure(api_key=single_key)
             return single_key
         return None
     next_key = next(key_pool)
-    genai.configure(api_key=next_key)
     return next_key
-
-# Configure genai initially with the first key if available
-rotate_api_key()
 
 def load_reference_images(folder_path: str = "reference_images") -> List[Image.Image]:
     """
@@ -80,25 +75,36 @@ def load_reference_images(folder_path: str = "reference_images") -> List[Image.I
         
     return images
 
-def get_active_flash_models() -> List[str]:
+def get_active_flash_models(client: Optional[genai.Client] = None) -> List[str]:
     """
-    Calls genai.list_models(), filters for models that contain 'flash' in their name
+    Calls client.models.list(), filters for models that contain 'flash' in their name
     and support 'generateContent', and sorts them descending.
-    Falls back to ['models/gemini-1.5-flash'] on failure.
+    Falls back to ['gemini-2.5-flash'] on failure.
     """
     try:
+        if client is None:
+            current_key = rotate_api_key()
+            if current_key:
+                client = genai.Client(api_key=current_key)
+            else:
+                client = genai.Client()
+
         models = []
-        for m in genai.list_models():
+        for m in client.models.list():
             name_lower = m.name.lower()
-            if "flash" in name_lower and "generateContent" in m.supported_generation_methods:
+            actions = getattr(m, "supported_actions", None)
+            if actions is None:
+                actions = getattr(m, "supported_generation_methods", None) or []
+            is_generate = "generateContent" in actions or "generate_content" in actions or any("generatecontent" in str(a).lower() for a in actions)
+            if "flash" in name_lower and is_generate:
                 models.append(m.name)
         models.sort(reverse=True)
         if not models:
-            return ["models/gemini-1.5-flash"]
+            return ["gemini-2.5-flash"]
         return models
     except Exception as e:
         print(f"Error fetching active flash models: {e}")
-        return ["models/gemini-1.5-flash"]
+        return ["gemini-2.5-flash"]
 
 def optimize_image(image_bytes: bytes) -> Optional[bytes]:
     """
@@ -135,7 +141,7 @@ def verify_document(image_bytes: bytes) -> dict:
     """
     Verifies the student assessment invoice image using Gemini.
     
-    1. Converts image_bytes to a PIL Image.
+    1. Converts image_bytes to a PIL Image to validate format.
     2. Loads reference images using load_reference_images().
     3. Builds the payload and runs the verify prompt against Gemini models.
     4. Automatically handles 429 ResourceExhausted errors by rotating the API key.
@@ -161,27 +167,35 @@ def verify_document(image_bytes: bytes) -> dict:
         "Extract the student ID."
     )
     
+    user_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+
     payload = []
     for ref_img in reference_images:
         payload.append(ref_img)
-    payload.append(user_image)
+    payload.append(user_part)
     payload.append(prompt)
     
-    models = get_active_flash_models()
+    current_key = rotate_api_key()
+    if current_key:
+        client = genai.Client(api_key=current_key)
+    else:
+        client = genai.Client()
+
+    models = get_active_flash_models(client)
     
     max_retries = max(len(api_keys), 3) if api_keys else 3
     
     for model_name in models:
         for attempt in range(max_retries):
             try:
-                model = genai.GenerativeModel(model_name)
-                generation_config = genai.GenerationConfig(
-                    response_mime_type="application/json"
+                config = types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    temperature=0.0
                 )
-                
-                response = model.generate_content(
-                    payload,
-                    generation_config=generation_config
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=payload,
+                    config=config
                 )
                 
                 text_content = response.text
@@ -205,10 +219,11 @@ def verify_document(image_bytes: bytes) -> dict:
                 }
                 
             except Exception as e:
-                # Check for 429/ResourceExhausted
+                # Check for 429/ResourceExhausted or equivalent errors.APIError
                 is_429 = False
-                if isinstance(e, google.api_core.exceptions.ResourceExhausted):
-                    is_429 = True
+                if isinstance(e, errors.APIError):
+                    if getattr(e, "code", None) == 429 or "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "ResourceExhausted" in str(e):
+                        is_429 = True
                 elif hasattr(e, "code") and getattr(e, "code") == 429:
                     is_429 = True
                 elif "429" in str(e) or "ResourceExhausted" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
@@ -216,9 +231,9 @@ def verify_document(image_bytes: bytes) -> dict:
                     
                 if is_429:
                     print(f"ResourceExhausted (429) on model {model_name}. Rotating API key and retrying...")
-                    rotated_key = rotate_api_key()
-                    if not rotated_key:
-                        break
+                    next_key = rotate_api_key()
+                    if next_key:
+                        client = genai.Client(api_key=next_key)
                     continue
                 else:
                     print(f"Error with model {model_name}: {e}")
