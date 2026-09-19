@@ -1,9 +1,11 @@
 import os
 import io
+import sqlite3
 import discord
 from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
+from typing import Optional, Set
 
 import database
 import ai_engine
@@ -12,12 +14,17 @@ import ai_engine
 load_dotenv(".env")
 load_dotenv("reference_images/.env")
 
+# Production Constants
+MAX_FILE_SIZE = 25 * 1024 * 1024  # 25MB
+
 class VerificationBot(commands.Bot):
     def __init__(self) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True
         super().__init__(command_prefix="!", intents=intents)
+        # In-memory set for tracking active in-flight verification requests
+        self.processing_users: Set[int] = set()
 
     async def setup_hook(self) -> None:
         # Initialize database
@@ -31,6 +38,25 @@ class VerificationBot(commands.Bot):
         # Sync slash commands
         await self.tree.sync()
         print("Bot persistent views registered and slash commands synced.")
+
+
+# ==================== HELPER FUNCTIONS ====================
+
+async def fetch_member_safely(guild: discord.Guild, user_id: int) -> Optional[discord.Member]:
+    """
+    Safely retrieves a member from the guild.
+    Tries memory cache first, then API fetch.
+    Handles discord.NotFound and discord.HTTPException.
+    """
+    try:
+        member = guild.get_member(user_id)
+        if not member:
+            member = await guild.fetch_member(user_id)
+        return member
+    except (discord.NotFound, discord.HTTPException) as e:
+        print(f"Failed to fetch member {user_id} safely: {e}")
+        return None
+
 
 # ==================== PERSISTENT VIEWS ====================
 
@@ -93,7 +119,7 @@ class DMStartCancelView(discord.ui.View):
         embed = discord.Embed(
             title="Upload Document",
             description=(
-                "Please upload your **Student Assessment Invoice** (as a JPG, PNG, or WEBP image under 8MB) "
+                "Please upload your **Student Assessment Invoice** (as a JPG, PNG, or WEBP image under 25MB) "
                 "directly in this DM channel."
             ),
             color=discord.Color.gold()
@@ -146,6 +172,34 @@ class StaffButtonsView(discord.ui.View):
             await interaction.response.send_message("❌ Error: Could not parse User ID.", ephemeral=True)
             return
             
+        # Staff Button Duplicate Check: Query db for student ID before approving
+        is_used_by_other = False
+        if student_id and student_id != "N/A" and student_id.strip():
+            with sqlite3.connect(database.DB_NAME) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT discord_id FROM users WHERE student_id = ? AND discord_id != ?",
+                    (student_id, str(user_id))
+                )
+                row = cursor.fetchone()
+                if row is not None:
+                    is_used_by_other = True
+                    
+        if is_used_by_other:
+            # Disable buttons to prevent further actions
+            for child in self.children:
+                child.disabled = True
+                
+            new_embed = discord.Embed.from_dict(embed.to_dict())
+            new_embed.color = discord.Color.red()
+            new_embed.add_field(
+                name="❌ Verification Blocked",
+                value=f"Duplicate Student ID detected: Student ID '{student_id}' is already registered to another Discord user. Approval blocked.",
+                inline=False
+            )
+            await interaction.response.edit_message(embed=new_embed, view=self)
+            return
+
         # Action: Unlock user & verify them
         database.unlock_user(str(user_id))
         if student_id and student_id != "N/A" and student_id.strip():
@@ -153,13 +207,8 @@ class StaffButtonsView(discord.ui.View):
         else:
             database.add_verified_user(str(user_id), f"STAFF_VERIFIED_{user_id}")
             
-        # Assign role
-        target_member = guild.get_member(user_id)
-        if not target_member:
-            try:
-                target_member = await guild.fetch_member(user_id)
-            except discord.NotFound:
-                target_member = None
+        # DM Member Fetch Safety: safely retrieve member
+        target_member = await fetch_member_safely(guild, user_id)
                 
         verified_role_id = int(os.environ.get("VERIFIED_ROLE_ID", 0))
         role_assigned = False
@@ -227,13 +276,8 @@ class StaffButtonsView(discord.ui.View):
         # Action: Unlock user so they can try again, but do not verify
         database.unlock_user(str(user_id))
         
-        # Notify user
-        target_member = guild.get_member(user_id)
-        if not target_member:
-            try:
-                target_member = await guild.fetch_member(user_id)
-            except discord.NotFound:
-                target_member = None
+        # DM Member Fetch Safety: safely retrieve member
+        target_member = await fetch_member_safely(guild, user_id)
                 
         if target_member:
             try:
@@ -302,10 +346,17 @@ async def on_message(message: discord.Message) -> None:
     if not message.attachments:
         return
 
-    user_id_str = str(message.author.id)
+    user_id = message.author.id
+    user_id_str = str(user_id)
+    
+    # In-flight DM Locking: check if user is already being processed
+    if user_id in bot.processing_users:
+        await message.reply("❌ Please wait until your current document analysis completes.")
+        return
+
     user_state = database.get_user_state(user_id_str)
     
-    # 3. Image Gatekeeper: Check if is_locked is True
+    # Check if is_locked is True
     if user_state is not None:
         strikes, is_locked = user_state
         if is_locked:
@@ -314,7 +365,7 @@ async def on_message(message: discord.Message) -> None:
     # Process first attachment
     attachment = message.attachments[0]
     
-    # Check mime type or filename, and size < 8MB
+    # Update File Filter to support 25MB
     is_valid_type = False
     if attachment.content_type:
         is_valid_type = attachment.content_type in ["image/jpeg", "image/png", "image/webp"]
@@ -322,98 +373,106 @@ async def on_message(message: discord.Message) -> None:
         ext = os.path.splitext(attachment.filename)[1].lower()
         is_valid_type = ext in [".jpg", ".jpeg", ".png", ".webp"]
 
-    if not is_valid_type or attachment.size >= 8000000:
-        await message.reply("❌ Invalid file. Please upload a JPG or PNG under 8MB.")
+    if not is_valid_type or attachment.size >= MAX_FILE_SIZE:
+        await message.reply("❌ Invalid file. Please upload a JPG or PNG under 25MB.")
         return
 
-    # 4. Processing & API Call
-    status_msg = await message.reply("⏳ Analyzing...")
+    # 2. Pipeline Injection: Immediately optimize the attachment bytes
+    try:
+        raw_bytes = await attachment.read()
+        optimized_bytes = ai_engine.optimize_image(raw_bytes)
+    except Exception as e:
+        print(f"Error reading attachment: {e}")
+        optimized_bytes = None
+
+    if optimized_bytes is None:
+        await message.reply("❌ Invalid file. The uploaded image is corrupted or invalid.")
+        return
+
+    # 4. Guaranteed Unlocking: Wrap the whole body in a lock with try/finally
+    bot.processing_users.add(user_id)
     
     try:
-        image_bytes = await attachment.read()
-        result = ai_engine.verify_document(image_bytes)
-    except Exception as e:
-        print(f"Error during AI verification: {e}")
-        await status_msg.edit(content="❌ An error occurred during verification. Please try again later.")
-        return
-
-    verified = result.get("verified", False)
-    reason = result.get("reason", "Verification unsuccessful.")
-    extracted_id = result.get("extracted_id", "").strip()
-
-    # 5. PASS Logic
-    if verified:
-        if database.is_student_id_used(extracted_id):
-            # Treat as duplicate -> Fail
-            verified = False
-            reason = f"Duplicate verification: Student ID '{extracted_id}' is already registered to another user."
-        else:
-            database.add_verified_user(user_id_str, extracted_id)
-            
-            guild_id = int(os.environ.get("GUILD_ID", 0))
-            guild = bot.get_guild(guild_id)
-            role_assigned = False
-            if guild:
-                role = guild.get_role(int(os.environ.get("VERIFIED_ROLE_ID", 0)))
-                member = guild.get_member(message.author.id)
-                if not member:
-                    try:
-                        member = await guild.fetch_member(message.author.id)
-                    except discord.NotFound:
-                        member = None
-                if member and role:
-                    try:
-                        await member.add_roles(role)
-                        role_assigned = True
-                    except Exception as e:
-                        print(f"Failed to assign role to {user_id_str} on success: {e}")
-
-            success_embed = discord.Embed(
-                title="Verification Successful",
-                description="🎉 Your student verification has been approved automatically!",
-                color=discord.Color.green()
-            )
-            success_embed.add_field(name="Student ID", value=extracted_id, inline=True)
-            if role_assigned:
-                success_embed.add_field(name="Role Assigned", value="Verified Student", inline=True)
-            else:
-                success_embed.add_field(name="Role Status", value="Role pending assignment.", inline=True)
-                
-            await status_msg.edit(content="✅ Analysis complete!")
-            await message.reply(embed=success_embed)
+        status_msg = await message.reply("⏳ Analyzing...")
+        
+        try:
+            # Run AI analysis using the compressed, optimized bytes
+            result = ai_engine.verify_document(optimized_bytes)
+        except Exception as e:
+            print(f"Error during AI verification: {e}")
+            await status_msg.edit(content="❌ An error occurred during verification. Please try again later.")
             return
 
-    # 6 & 7. FAIL Logic
-    database.add_strike(user_id_str)
-    updated_state = database.get_user_state(user_id_str)
-    strikes = 1
-    is_locked = False
-    if updated_state:
-        strikes, is_locked = updated_state
+        verified = result.get("verified", False)
+        reason = result.get("reason", "Verification unsuccessful.")
+        extracted_id = result.get("extracted_id", "").strip()
 
-    if is_locked or strikes >= 2:
-        # Strike 2 (Lock user & forward to staff)
-        await status_msg.edit(content="❌ Verification failed.")
-        
-        lock_embed = discord.Embed(
-            title="Verification Locked",
-            description=(
-                "❌ You have accumulated 2 strikes. Your verification has been locked "
-                "and forwarded to server staff for manual review. Please wait for assistance."
-            ),
-            color=discord.Color.red()
-        )
-        lock_embed.add_field(name="Failure Reason", value=reason, inline=False)
-        await message.reply(embed=lock_embed)
-        
-        # Send to staff pending channel
-        pending_channel_id = int(os.environ.get("PENDING_CHANNEL_ID", 0))
-        pending_channel = bot.get_channel(pending_channel_id)
-        if pending_channel:
-            try:
-                img_data = await attachment.read()
-                file_to_forward = discord.File(io.BytesIO(img_data), filename=attachment.filename)
+        # PASS Logic
+        if verified:
+            if database.is_student_id_used(extracted_id):
+                # Treat as duplicate -> Fail
+                verified = False
+                reason = f"Duplicate verification: Student ID '{extracted_id}' is already registered to another user."
+            else:
+                database.add_verified_user(user_id_str, extracted_id)
                 
+                guild_id = int(os.environ.get("GUILD_ID", 0))
+                guild = bot.get_guild(guild_id)
+                role_assigned = False
+                if guild:
+                    role = guild.get_role(int(os.environ.get("VERIFIED_ROLE_ID", 0)))
+                    # DM Member Fetch Safety: safely fetch member
+                    member = await fetch_member_safely(guild, user_id)
+                    if member and role:
+                        try:
+                            await member.add_roles(role)
+                            role_assigned = True
+                        except Exception as e:
+                            print(f"Failed to assign role to {user_id_str} on success: {e}")
+
+                success_embed = discord.Embed(
+                    title="Verification Successful",
+                    description="🎉 Your student verification has been approved automatically!",
+                    color=discord.Color.green()
+                )
+                success_embed.add_field(name="Student ID", value=extracted_id, inline=True)
+                if role_assigned:
+                    success_embed.add_field(name="Role Assigned", value="Verified Student", inline=True)
+                else:
+                    success_embed.add_field(name="Role Status", value="Role pending assignment.", inline=True)
+                    
+                await status_msg.edit(content="✅ Analysis complete!")
+                await message.reply(embed=success_embed)
+                return
+
+        # FAIL Logic (Warning or Lock)
+        database.add_strike(user_id_str)
+        updated_state = database.get_user_state(user_id_str)
+        strikes = 1
+        is_locked = False
+        if updated_state:
+            strikes, is_locked = updated_state
+
+        if is_locked or strikes >= 2:
+            # Strike 2 (Lock user & forward to staff)
+            await status_msg.edit(content="❌ Verification failed.")
+            
+            lock_embed = discord.Embed(
+                title="Verification Locked",
+                description=(
+                    "❌ You have accumulated 2 strikes. Your verification has been locked "
+                    "and forwarded to server staff for manual review. Please wait for assistance."
+                ),
+                color=discord.Color.red()
+            )
+            lock_embed.add_field(name="Failure Reason", value=reason, inline=False)
+            await message.reply(embed=lock_embed)
+            
+            # Send to staff pending channel
+            pending_channel_id = int(os.environ.get("PENDING_CHANNEL_ID", 0))
+            pending_channel = bot.get_channel(pending_channel_id)
+            if pending_channel:
+                view = StaffButtonsView()
                 staff_embed = discord.Embed(
                     title="Manual Verification Required",
                     description="User has accumulated 2 strikes and is locked. Please review the attached document.",
@@ -423,38 +482,32 @@ async def on_message(message: discord.Message) -> None:
                 staff_embed.add_field(name="User ID", value=user_id_str, inline=True)
                 staff_embed.add_field(name="Student ID", value=extracted_id if extracted_id else "N/A", inline=True)
                 staff_embed.add_field(name="Failure Reason", value=reason, inline=False)
-                
-                view = StaffButtonsView()
-                await pending_channel.send(embed=staff_embed, file=file_to_forward, view=view)
-            except Exception as e:
-                print(f"Failed to forward verification image to staff: {e}")
-                
-                staff_embed = discord.Embed(
-                    title="Manual Verification Required",
-                    description="User has accumulated 2 strikes and is locked. (Image download failed)",
-                    color=discord.Color.orange()
-                )
-                staff_embed.add_field(name="User Mention", value=message.author.mention, inline=True)
-                staff_embed.add_field(name="User ID", value=user_id_str, inline=True)
-                staff_embed.add_field(name="Student ID", value=extracted_id if extracted_id else "N/A", inline=True)
-                staff_embed.add_field(name="Failure Reason", value=reason, inline=False)
-                
-                view = StaffButtonsView()
-                await pending_channel.send(embed=staff_embed, view=view)
-    else:
-        # Strike 1: Warning
-        await status_msg.edit(content="❌ Verification failed.")
-        
-        warn_embed = discord.Embed(
-            title="Verification Warning (Strike 1/2)",
-            description=(
-                "⚠️ Your document verification failed. You have received 1 strike. "
-                "You have one remaining attempt before your account is locked and sent to manual review."
-            ),
-            color=discord.Color.yellow()
-        )
-        warn_embed.add_field(name="Failure Reason", value=reason, inline=False)
-        await message.reply(embed=warn_embed)
+
+                # Re-upload the optimized image buffer directly (always < 10MB, no URLs)
+                try:
+                    file_to_forward = discord.File(io.BytesIO(optimized_bytes), filename="sai_document.jpg")
+                    await pending_channel.send(embed=staff_embed, file=file_to_forward, view=view)
+                except Exception as e:
+                    print(f"Failed to forward verification image to staff: {e}")
+                    await pending_channel.send(embed=staff_embed, view=view)
+        else:
+            # Strike 1: Warning
+            await status_msg.edit(content="❌ Verification failed.")
+            
+            warn_embed = discord.Embed(
+                title="Verification Warning (Strike 1/2)",
+                description=(
+                    "⚠️ Your document verification failed. You have received 1 strike. "
+                    "You have one remaining attempt before your account is locked and sent to manual review."
+                ),
+                color=discord.Color.yellow()
+            )
+            warn_embed.add_field(name="Failure Reason", value=reason, inline=False)
+            await message.reply(embed=warn_embed)
+            
+    finally:
+        # Guarantee user is removed from processing set
+        bot.processing_users.discard(user_id)
 
 
 if __name__ == "__main__":

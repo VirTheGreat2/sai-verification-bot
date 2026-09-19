@@ -117,5 +117,26 @@ class TestAIEngine(unittest.TestCase):
         self.assertFalse(result["verified"])
         self.assertEqual(result["reason"], "Invalid ID")
 
+    def test_optimize_image_success(self) -> None:
+        # Create a dummy 100x100 RGBA image
+        img = Image.new("RGBA", (100, 100), color=(255, 0, 0, 128))
+        img_bytes_io = io.BytesIO()
+        img.save(img_bytes_io, format="PNG")
+        raw_bytes = img_bytes_io.getvalue()
+        
+        optimized = ai_engine.optimize_image(raw_bytes)
+        self.assertIsNotNone(optimized)
+        
+        # Verify optimized image can be opened and is of RGB mode
+        opt_img = Image.open(io.BytesIO(optimized))
+        self.assertEqual(opt_img.mode, "RGB")
+        self.assertTrue(opt_img.width <= 2048)
+        self.assertTrue(opt_img.height <= 2048)
+
+    def test_optimize_image_invalid(self) -> None:
+        # Passing garbage bytes should return None
+        optimized = ai_engine.optimize_image(b"not_an_image_garbage_bytes_xyz")
+        self.assertIsNone(optimized)
+
 if __name__ == "__main__":
     unittest.main()

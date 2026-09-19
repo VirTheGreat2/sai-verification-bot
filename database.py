@@ -15,6 +15,7 @@ def init_db() -> None:
     - timestamp (TEXT, default CURRENT_TIMESTAMP)
     """
     with sqlite3.connect(DB_NAME) as conn:
+        conn.execute("PRAGMA journal_mode=WAL;")
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (

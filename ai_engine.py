@@ -100,6 +100,37 @@ def get_active_flash_models() -> List[str]:
         print(f"Error fetching active flash models: {e}")
         return ["models/gemini-1.5-flash"]
 
+def optimize_image(image_bytes: bytes) -> Optional[bytes]:
+    """
+    Optimizes an image's size, format, and resolution for safe API transport and server uploads.
+    - Downscales to fit within 2048x2048 while preserving aspect ratio.
+    - Converts color modes to RGB.
+    - Saves as JPEG at 85% quality.
+    - Returns None if invalid or corrupted.
+    """
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img.load()
+    except Exception as e:
+        print(f"Failed to identify or load image: {e}")
+        return None
+
+    try:
+        # Convert RGBA/P to RGB
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        
+        # Downscale maximum maintaining aspect ratio
+        img.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+        
+        # Compress and save as JPEG
+        out_buf = io.BytesIO()
+        img.save(out_buf, format="JPEG", quality=85)
+        return out_buf.getvalue()
+    except Exception as e:
+        print(f"Error optimizing image: {e}")
+        return None
+
 def verify_document(image_bytes: bytes) -> dict:
     """
     Verifies the student assessment invoice image using Gemini.

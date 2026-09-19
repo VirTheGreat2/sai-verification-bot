@@ -69,5 +69,44 @@ class TestBot(unittest.IsolatedAsyncioTestCase):
                 ephemeral=True
             )
 
+    async def test_fetch_member_safely_success(self) -> None:
+        mock_guild = MagicMock(spec=discord.Guild)
+        mock_member = MagicMock(spec=discord.Member)
+        mock_guild.get_member.return_value = mock_member
+        
+        member = await bot.fetch_member_safely(mock_guild, 12345)
+        self.assertEqual(member, mock_member)
+        mock_guild.get_member.assert_called_with(12345)
+
+    async def test_fetch_member_safely_not_found(self) -> None:
+        mock_guild = MagicMock(spec=discord.Guild)
+        mock_guild.get_member.return_value = None
+        # fetch_member raises NotFound
+        mock_response = MagicMock()
+        mock_response.status = 404
+        mock_guild.fetch_member.side_effect = discord.NotFound(mock_response, "Not Found")
+        
+        member = await bot.fetch_member_safely(mock_guild, 12345)
+        self.assertIsNone(member)
+
+    async def test_in_flight_dm_locking(self) -> None:
+        # If user is in processing_users, on_message should reject immediately
+        bot.bot.processing_users.add(999) # Add user 999 to active set of global bot
+        
+        mock_message = AsyncMock(spec=discord.Message)
+        mock_message.author = MagicMock()
+        mock_message.author.bot = False
+        mock_message.author.id = 999
+        mock_message.guild = None
+        mock_message.attachments = [MagicMock()]
+        
+        await bot.on_message(mock_message)
+        
+        # Check that it replied with the in-flight lock message
+        mock_message.reply.assert_called_with("❌ Please wait until your current document analysis completes.")
+        
+        # Clean up
+        bot.bot.processing_users.discard(999)
+
 if __name__ == "__main__":
     unittest.main()
