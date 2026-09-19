@@ -26,6 +26,16 @@ class TestPreflight(unittest.TestCase):
     def test_check_env_variables_success(self) -> None:
         self.assertTrue(preflight.check_env_variables())
 
+    @patch.dict(os.environ, {
+        "DISCORD_TOKEN": "mock_token",
+        "GEMINI_API_KEY": "mock_gemini_key",
+        "GUILD_ID": "123456789",
+        "VERIFIED_ROLE_ID": "987654321",
+        "MOD_LOG_CHANNEL_ID": "111222333"
+    }, clear=True)
+    def test_check_env_variables_with_mod_log(self) -> None:
+        self.assertTrue(preflight.check_env_variables())
+
     @patch("preflight.load_dotenv")
     @patch.dict(os.environ, {
         "DISCORD_TOKEN": "mock_token",

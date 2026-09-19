@@ -313,11 +313,22 @@ bot = VerificationBot()
 
 # ==================== BOT SLASH COMMANDS ====================
 
+def is_staff_or_admin(interaction: discord.Interaction) -> bool:
+    support_role_id = int(os.environ.get("SUPPORT_ROLE_ID", 0))
+    user = interaction.user
+    if hasattr(user, "roles"):
+        if any(getattr(role, "id", None) == support_role_id for role in user.roles):
+            return True
+    if hasattr(user, "guild_permissions"):
+        if getattr(user.guild_permissions, "administrator", False):
+            return True
+    return False
+
+
 @bot.tree.command(name="setup-verify", description="Sets up the student verification channel with the dropdown menu.")
 async def setup_verify(interaction: discord.Interaction) -> None:
     # Restrict to Support Role or Admin
-    support_role_id = int(os.environ.get("SUPPORT_ROLE_ID", 0))
-    if not any(role.id == support_role_id for role in interaction.user.roles) and not interaction.user.guild_permissions.administrator:
+    if not is_staff_or_admin(interaction):
         await interaction.response.send_message("❌ You do not have permission to run this command.", ephemeral=True)
         return
 
@@ -338,6 +349,130 @@ async def setup_verify(interaction: discord.Interaction) -> None:
     view = VerifyDropdownView()
     await channel.send(embed=embed, view=view)
     await interaction.response.send_message("✅ Verification dropdown posted successfully!", ephemeral=True)
+
+
+@bot.tree.command(name="check-student", description="Inspect a student's verification status by Student ID or User.")
+@app_commands.describe(student_id="Raw Student ID", user="Discord user to check")
+async def check_student(
+    interaction: discord.Interaction,
+    student_id: Optional[str] = None,
+    user: Optional[discord.User] = None
+) -> None:
+    if not is_staff_or_admin(interaction):
+        await interaction.response.send_message("❌ You do not have permission to run this command.", ephemeral=True)
+        return
+
+    if not student_id and not user:
+        await interaction.response.send_message("❌ Please specify either a student_id or a user.", ephemeral=True)
+        return
+
+    record = None
+    if user:
+        record = database.get_student_by_discord_id(user.id)
+    elif student_id:
+        record = database.get_student_by_id(student_id)
+
+    if not record:
+        await interaction.response.send_message("❌ No verification record found.", ephemeral=True)
+        return
+
+    discord_id = record["discord_id"]
+    timestamp = record.get("timestamp", "N/A")
+    student_id_hash = record.get("student_id_hash", "N/A")
+
+    user_state = database.get_user_state(str(discord_id))
+    if user_state:
+        strikes, is_locked = user_state
+        status = "Locked" if is_locked else f"Active ({strikes} strikes)"
+    else:
+        status = "Verified"
+
+    embed = discord.Embed(
+        title="Student Verification Info",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="Registered User", value=f"<@{discord_id}> ({discord_id})", inline=False)
+    embed.add_field(name="Student ID Hash", value=student_id_hash, inline=False)
+    embed.add_field(name="Registration Date", value=timestamp, inline=True)
+    embed.add_field(name="Current Status", value=status, inline=True)
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="unlink-student", description="Remove a student's verification record and role by Student ID or User.")
+@app_commands.describe(student_id="Raw Student ID", user="Discord user to unlink")
+async def unlink_student(
+    interaction: discord.Interaction,
+    student_id: Optional[str] = None,
+    user: Optional[discord.User] = None
+) -> None:
+    if not is_staff_or_admin(interaction):
+        await interaction.response.send_message("❌ You do not have permission to run this command.", ephemeral=True)
+        return
+
+    if not student_id and not user:
+        await interaction.response.send_message("❌ Please specify either a student_id or a user.", ephemeral=True)
+        return
+
+    target_discord_id = None
+    deleted = False
+
+    if user:
+        target_discord_id = user.id
+        deleted = database.delete_student_by_discord_id(user.id)
+    elif student_id:
+        record = database.get_student_by_id(student_id)
+        if record:
+            target_discord_id = record["discord_id"]
+        deleted = database.delete_student_record(student_id)
+
+    if not deleted and not target_discord_id:
+        await interaction.response.send_message("❌ No record found to unlink.", ephemeral=True)
+        return
+
+    if target_discord_id and interaction.guild:
+        verified_role_id = int(os.environ.get("VERIFIED_ROLE_ID", 0))
+        role = interaction.guild.get_role(verified_role_id)
+        member = await fetch_member_safely(interaction.guild, target_discord_id)
+        if member and role and role in member.roles:
+            try:
+                await member.remove_roles(role)
+            except Exception as e:
+                print(f"Failed to remove role on unlink: {e}")
+
+    await interaction.response.send_message("✅ Unlinked Student ID/User. They can now re-run verification.", ephemeral=True)
+
+
+@bot.tree.command(name="force-verify", description="Manually force-verify a user with a Student ID.")
+@app_commands.describe(user="Discord user to verify", student_id="Student ID to assign")
+async def force_verify(
+    interaction: discord.Interaction,
+    user: discord.User,
+    student_id: str
+) -> None:
+    if not is_staff_or_admin(interaction):
+        await interaction.response.send_message("❌ You do not have permission to run this command.", ephemeral=True)
+        return
+
+    # Delete existing link for user or student_id first
+    database.delete_student_by_discord_id(user.id)
+    database.delete_student_record(student_id)
+
+    # Force register and unlock
+    database.add_verified_user(str(user.id), student_id)
+    database.unlock_user(str(user.id))
+
+    if interaction.guild:
+        verified_role_id = int(os.environ.get("VERIFIED_ROLE_ID", 0))
+        role = interaction.guild.get_role(verified_role_id)
+        member = await fetch_member_safely(interaction.guild, user.id)
+        if member and role:
+            try:
+                await member.add_roles(role)
+            except Exception as e:
+                print(f"Failed to assign role on force-verify: {e}")
+
+    await interaction.response.send_message(f"✅ Manually verified <@{user.id}> with Student ID {student_id}.", ephemeral=True)
 
 # ==================== BACKGROUND WORKER ====================
 
@@ -386,6 +521,32 @@ async def verification_worker() -> None:
                     # Treat as duplicate -> Fail
                     verified = False
                     reason = f"Duplicate verification: Student ID '{extracted_id}' is already registered to another user."
+
+                    # Send audit alert to MOD_LOG_CHANNEL_ID
+                    existing_record = database.get_student_by_id(extracted_id)
+                    original_discord_id = existing_record["discord_id"] if existing_record else "Unknown"
+                    mod_log_id = int(os.environ.get("MOD_LOG_CHANNEL_ID", 0))
+                    if mod_log_id:
+                        try:
+                            mod_channel = bot.get_channel(mod_log_id)
+                            if not mod_channel:
+                                mod_channel = await bot.fetch_channel(mod_log_id)
+                            if mod_channel:
+                                mod_embed = discord.Embed(
+                                    title="⚠️ Duplicate Student ID Detected",
+                                    description="A student submitted a Student ID that is already registered in the system.",
+                                    color=discord.Color.gold()
+                                )
+                                mod_embed.add_field(name="Applicant", value=f"<@{user_id}>", inline=True)
+                                mod_embed.add_field(name="Existing Registered User", value=f"<@{original_discord_id}>", inline=True)
+                                mod_embed.add_field(
+                                    name="Action Needed",
+                                    value="Staff review required via `/check-student` or `/unlink-student`.",
+                                    inline=False
+                                )
+                                await mod_channel.send(embed=mod_embed)
+                        except Exception as e:
+                            print(f"Failed to send mod log embed: {e}")
                 else:
                     database.add_verified_user(user_id_str, extracted_id)
                     

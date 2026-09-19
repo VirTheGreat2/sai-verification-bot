@@ -46,6 +46,10 @@ def check_env_variables() -> bool:
         logger.error(f"Missing required environment variable(s): {', '.join(missing)}")
         return False
 
+    mod_log_channel = os.environ.get("MOD_LOG_CHANNEL_ID")
+    if not mod_log_channel or not mod_log_channel.strip():
+        logger.warning("Optional MOD_LOG_CHANNEL_ID environment variable is not set.")
+
     logger.info("Environment variables check passed.")
     return True
 

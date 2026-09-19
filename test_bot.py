@@ -147,5 +147,64 @@ class TestBot(unittest.IsolatedAsyncioTestCase):
         # Clean up
         bot.bot.processing_users.discard(888)
 
+    async def test_check_student_command(self) -> None:
+        database.add_verified_user("123456", "STUDENT101")
+
+        mock_interaction = MagicMock(spec=discord.Interaction)
+        mock_interaction.user = MagicMock()
+        mock_interaction.user.roles = []
+        mock_interaction.user.guild_permissions.administrator = True
+        mock_interaction.response = AsyncMock()
+
+        # Check by user
+        mock_target_user = MagicMock(spec=discord.User)
+        mock_target_user.id = 123456
+
+        await bot.check_student.callback(mock_interaction, student_id=None, user=mock_target_user)
+        mock_interaction.response.send_message.assert_called()
+        args, kwargs = mock_interaction.response.send_message.call_args
+        self.assertTrue(kwargs.get("ephemeral"))
+        self.assertIn("embed", kwargs)
+
+    async def test_unlink_student_command(self) -> None:
+        database.add_verified_user("123456", "STUDENT101")
+
+        mock_interaction = MagicMock(spec=discord.Interaction)
+        mock_interaction.user = MagicMock()
+        mock_interaction.user.roles = []
+        mock_interaction.user.guild_permissions.administrator = True
+        mock_interaction.response = AsyncMock()
+        mock_interaction.guild = None
+
+        mock_target_user = MagicMock(spec=discord.User)
+        mock_target_user.id = 123456
+
+        await bot.unlink_student.callback(mock_interaction, student_id=None, user=mock_target_user)
+        mock_interaction.response.send_message.assert_called_with(
+            "✅ Unlinked Student ID/User. They can now re-run verification.",
+            ephemeral=True
+        )
+        self.assertIsNone(database.get_student_by_discord_id(123456))
+
+    async def test_force_verify_command(self) -> None:
+        mock_interaction = MagicMock(spec=discord.Interaction)
+        mock_interaction.user = MagicMock()
+        mock_interaction.user.roles = []
+        mock_interaction.user.guild_permissions.administrator = True
+        mock_interaction.response = AsyncMock()
+        mock_interaction.guild = None
+
+        mock_target_user = MagicMock(spec=discord.User)
+        mock_target_user.id = 777888
+
+        await bot.force_verify.callback(mock_interaction, user=mock_target_user, student_id="STUDENT999")
+        mock_interaction.response.send_message.assert_called_with(
+            "✅ Manually verified <@777888> with Student ID STUDENT999.",
+            ephemeral=True
+        )
+        res = database.get_student_by_discord_id(777888)
+        self.assertIsNotNone(res)
+
+
 if __name__ == "__main__":
     unittest.main()

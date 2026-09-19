@@ -103,5 +103,46 @@ class TestDatabase(unittest.TestCase):
             self.assertEqual(stored_student_id, expected_hash)
             self.assertNotEqual(stored_student_id, raw_id)
 
+    def test_get_student_by_id_and_discord_id(self) -> None:
+        raw_id = "student999"
+        database.add_verified_user("123456789", raw_id)
+
+        # Test get_student_by_id with raw student_id
+        res = database.get_student_by_id(raw_id)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["discord_id"], 123456789)
+        self.assertEqual(res["student_id_hash"], database.hash_student_id(raw_id))
+
+        # Test get_student_by_discord_id with integer discord_id
+        res2 = database.get_student_by_discord_id(123456789)
+        self.assertIsNotNone(res2)
+        self.assertEqual(res2["discord_id"], 123456789)
+        self.assertEqual(res2["student_id_hash"], database.hash_student_id(raw_id))
+
+        # Test nonexistent
+        self.assertIsNone(database.get_student_by_id("nonexistent"))
+        self.assertIsNone(database.get_student_by_discord_id(999999999))
+
+    def test_delete_student_record_and_by_discord_id(self) -> None:
+        raw_id1 = "student111"
+        raw_id2 = "student222"
+        database.add_verified_user("111111", raw_id1)
+        database.add_verified_user("222222", raw_id2)
+
+        # Delete by student record
+        deleted = database.delete_student_record(raw_id1)
+        self.assertTrue(deleted)
+        self.assertIsNone(database.get_student_by_id(raw_id1))
+
+        # Delete by discord id
+        deleted2 = database.delete_student_by_discord_id(222222)
+        self.assertTrue(deleted2)
+        self.assertIsNone(database.get_student_by_discord_id(222222))
+
+        # Deleting non-existent returns False
+        self.assertFalse(database.delete_student_record("nonexistent"))
+        self.assertFalse(database.delete_student_by_discord_id(999999))
+
+
 if __name__ == "__main__":
     unittest.main()

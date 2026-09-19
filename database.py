@@ -1,6 +1,6 @@
 import sqlite3
 import hashlib
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union, Dict, Any
 
 DB_NAME = "verified_students.db"
 
@@ -123,3 +123,98 @@ def unlock_user(discord_id: str) -> None:
             WHERE discord_id = ?
         """, (discord_id,))
         conn.commit()
+
+
+def get_student_by_id(student_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Hash incoming student_id and return dict with student_id_hash, discord_id (int), and timestamp,
+    or None if not found.
+    """
+    if not student_id:
+        return None
+    hashed_id = hash_student_id(student_id)
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT student_id, discord_id, timestamp FROM users WHERE student_id = ? OR student_id = ?",
+            (hashed_id, student_id)
+        )
+        row = cursor.fetchone()
+        if row:
+            d_id = row[1]
+            try:
+                d_id = int(d_id)
+            except (ValueError, TypeError):
+                pass
+            return {
+                "student_id_hash": row[0],
+                "discord_id": d_id,
+                "timestamp": row[2]
+            }
+        return None
+
+
+def get_student_by_discord_id(discord_id: Union[int, str]) -> Optional[Dict[str, Any]]:
+    """
+    Query table by discord_id and return dict with student_id_hash, discord_id (int), and timestamp,
+    or None if not found.
+    """
+    if discord_id is None:
+        return None
+    d_str = str(discord_id)
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT student_id, discord_id, timestamp FROM users WHERE discord_id = ?",
+            (d_str,)
+        )
+        row = cursor.fetchone()
+        if row:
+            d_id = row[1]
+            try:
+                d_id = int(d_id)
+            except (ValueError, TypeError):
+                pass
+            return {
+                "student_id_hash": row[0],
+                "discord_id": d_id,
+                "timestamp": row[2]
+            }
+        return None
+
+
+def delete_student_record(student_id: str) -> bool:
+    """
+    Hash incoming student_id and delete record matching student_id.
+    Returns True if a row was deleted, False otherwise.
+    """
+    if not student_id:
+        return False
+    hashed_id = hash_student_id(student_id)
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM users WHERE student_id = ? OR student_id = ?",
+            (hashed_id, student_id)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def delete_student_by_discord_id(discord_id: Union[int, str]) -> bool:
+    """
+    Delete record matching discord_id.
+    Returns True if a row was deleted, False otherwise.
+    """
+    if discord_id is None:
+        return False
+    d_str = str(discord_id)
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM users WHERE discord_id = ?",
+            (d_str,)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
