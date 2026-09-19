@@ -219,6 +219,8 @@ __marimo__/
 
 # Custom SQLite Database Files
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 
 # Optional: Sensitive test images containing private student data

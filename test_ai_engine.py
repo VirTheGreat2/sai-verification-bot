@@ -64,10 +64,14 @@ class TestAIEngine(unittest.TestCase):
         self.assertNotIn("gemini-2.5-pro", models)
         self.assertEqual(models, ["gemini-2.5-flash", "gemini-2.0-flash-latest"])
 
+    @patch("ai_engine.load_reference_images")
+    @patch("ai_engine.optimize_image")
     @patch("google.genai.Client")
     @patch("ai_engine.get_active_flash_models")
-    def test_verify_document_success(self, mock_get_models: MagicMock, mock_client_cls: MagicMock) -> None:
+    def test_verify_document_success(self, mock_get_models: MagicMock, mock_client_cls: MagicMock, mock_optimize: MagicMock, mock_load_refs: MagicMock) -> None:
         mock_get_models.return_value = ["gemini-2.5-flash"]
+        mock_load_refs.return_value = []
+        mock_optimize.return_value = b"optimized_bytes"
         
         # Mock model response
         mock_client = MagicMock()
@@ -87,12 +91,16 @@ class TestAIEngine(unittest.TestCase):
         self.assertEqual(result["reason"], "Looks good")
         self.assertEqual(result["extracted_id"], "12345")
 
+    @patch("ai_engine.load_reference_images")
+    @patch("ai_engine.optimize_image")
     @patch("google.genai.Client")
     @patch("ai_engine.get_active_flash_models")
     @patch("ai_engine.rotate_api_key")
-    def test_verify_document_retry_on_429(self, mock_rotate_key: MagicMock, mock_get_models: MagicMock, mock_client_cls: MagicMock) -> None:
+    def test_verify_document_retry_on_429(self, mock_rotate_key: MagicMock, mock_get_models: MagicMock, mock_client_cls: MagicMock, mock_optimize: MagicMock, mock_load_refs: MagicMock) -> None:
         mock_get_models.return_value = ["gemini-2.5-flash"]
         mock_rotate_key.return_value = "rotated_key"
+        mock_load_refs.return_value = []
+        mock_optimize.return_value = b"optimized_bytes"
         
         mock_client = MagicMock()
         

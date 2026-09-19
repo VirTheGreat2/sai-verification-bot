@@ -364,13 +364,16 @@ async def verification_worker() -> None:
             if optimized_bytes is None:
                 await status_msg.edit(content="❌ Invalid file. The uploaded image is corrupted or invalid.")
                 continue
-                
+
+            # Offload synchronous AI engine call to thread pool via asyncio.to_thread
             try:
-                # Run AI analysis using the compressed, optimized bytes
-                result = ai_engine.verify_document(optimized_bytes)
+                result = await asyncio.to_thread(ai_engine.verify_document, optimized_bytes)
             except Exception as e:
                 print(f"Error during AI verification: {e}")
-                await status_msg.edit(content="❌ An error occurred during verification. Please try again later.")
+                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "ResourceExhausted" in str(e):
+                    await status_msg.edit(content="⚠️ Service Busy: Rate limit reached. Please try again in 5 minutes.")
+                else:
+                    await status_msg.edit(content="❌ An error occurred during verification. Please try again later.")
                 continue
 
             verified = result.get("verified", False)
@@ -477,6 +480,11 @@ async def verification_worker() -> None:
                 
         except Exception as e:
             print(f"Error in verification worker processing: {e}")
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "ResourceExhausted" in str(e):
+                try:
+                    await message.reply("⚠️ Service Busy: Rate limit reached. Please try again in 5 minutes.")
+                except Exception:
+                    pass
         finally:
             bot.processing_users.discard(user_id)
             verification_queue.task_done()

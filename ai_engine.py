@@ -78,9 +78,11 @@ def load_reference_images(folder_path: str = "reference_images") -> List[Image.I
 def get_active_flash_models(client: Optional[genai.Client] = None) -> List[str]:
     """
     Calls client.models.list(), filters for models that contain 'flash' in their name
-    and support 'generateContent', and sorts them descending.
-    Falls back to ['gemini-2.5-flash'] on failure.
+    and support 'generateContent'.
+    Returns a list of available flash models.
+    Falls back to ['gemini-2.5-flash'] or default chain on failure.
     """
+    default_fallback = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-1.5-flash"]
     try:
         if client is None:
             current_key = rotate_api_key()
@@ -89,7 +91,7 @@ def get_active_flash_models(client: Optional[genai.Client] = None) -> List[str]:
             else:
                 client = genai.Client()
 
-        models = []
+        discovered_models = []
         for m in client.models.list():
             name_lower = m.name.lower()
             actions = getattr(m, "supported_actions", None)
@@ -97,14 +99,16 @@ def get_active_flash_models(client: Optional[genai.Client] = None) -> List[str]:
                 actions = getattr(m, "supported_generation_methods", None) or []
             is_generate = "generateContent" in actions or "generate_content" in actions or any("generatecontent" in str(a).lower() for a in actions)
             if "flash" in name_lower and is_generate:
-                models.append(m.name)
-        models.sort(reverse=True)
-        if not models:
-            return ["gemini-2.5-flash"]
-        return models
+                discovered_models.append(m.name)
+
+        if not discovered_models:
+            return default_fallback
+
+        discovered_models.sort(reverse=True)
+        return discovered_models
     except Exception as e:
         print(f"Error fetching active flash models: {e}")
-        return ["gemini-2.5-flash"]
+        return default_fallback
 
 def optimize_image(image_bytes: bytes) -> Optional[bytes]:
     """
@@ -141,11 +145,12 @@ def verify_document(image_bytes: bytes) -> dict:
     """
     Verifies the student assessment invoice image using Gemini.
     
-    1. Converts image_bytes to a PIL Image to validate format.
-    2. Loads reference images using load_reference_images().
-    3. Builds the payload and runs the verify prompt against Gemini models.
-    4. Automatically handles 429 ResourceExhausted errors by rotating the API key.
-    5. Cleans and parses the response to return {"verified": bool, "reason": str, "extracted_id": str}.
+    1. Converts image_bytes to PIL Image to validate format.
+    2. Loads reference images.
+    3. Builds payload and runs verification prompt against Gemini Flash models.
+    4. Smart cascading fallback: automatically handles 429 ResourceExhausted errors by
+       rotating API key and cascading across Flash models.
+    5. Cleans and parses JSON response schema: {"status": "PASS"|"FAIL", "student_id": string|null, "reason": string}.
     """
     try:
         user_image = Image.open(io.BytesIO(image_bytes))
@@ -153,8 +158,10 @@ def verify_document(image_bytes: bytes) -> dict:
     except Exception as e:
         return {
             "verified": False,
+            "status": "FAIL",
             "reason": f"Failed to load user image: {str(e)}",
-            "extracted_id": ""
+            "extracted_id": "",
+            "student_id": None
         }
         
     reference_images = load_reference_images()
@@ -164,10 +171,13 @@ def verify_document(image_bytes: bytes) -> dict:
         "Text check: Require STI EDUCATION SERVICES GROUP, INC, Student Name, Student ID, and Academic Term. "
         "Visual check: Match table grid layout and headers against ANY of the provided valid reference images. "
         "Tolerance: Ignore minor camera tilts, subtle blur, warm lighting, CamScanner borders, and fold creases. "
-        "Extract the student ID."
+        "Extract the student ID. "
+        "Return ONLY a JSON object matching this schema: {\"status\": \"PASS\"|\"FAIL\", \"student_id\": \"<extracted_id_or_null>\", \"reason\": \"<explanation>\"}"
     )
     
-    user_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+    # Downscale user image to safe JPEG bytes
+    opt_bytes = optimize_image(image_bytes) or image_bytes
+    user_part = types.Part.from_bytes(data=opt_bytes, mime_type="image/jpeg")
 
     payload = []
     for ref_img in reference_images:
@@ -182,9 +192,8 @@ def verify_document(image_bytes: bytes) -> dict:
         client = genai.Client()
 
     models = get_active_flash_models(client)
-    
     max_retries = max(len(api_keys), 3) if api_keys else 3
-    
+
     for model_name in models:
         for attempt in range(max_retries):
             try:
@@ -212,14 +221,23 @@ def verify_document(image_bytes: bytes) -> dict:
                     cleaned_text = "\n".join(lines).strip()
                 
                 parsed_json = json.loads(cleaned_text)
+                
+                status = str(parsed_json.get("status", "")).upper()
+                verified = bool(parsed_json.get("verified", False)) or (status == "PASS")
+                extracted_id = str(parsed_json.get("extracted_id") or parsed_json.get("student_id") or "").strip()
+                if extracted_id.lower() in ("null", "none"):
+                    extracted_id = ""
+                reason = str(parsed_json.get("reason", ""))
+                
                 return {
-                    "verified": bool(parsed_json.get("verified", False)),
-                    "reason": str(parsed_json.get("reason", "")),
-                    "extracted_id": str(parsed_json.get("extracted_id", ""))
+                    "verified": verified,
+                    "status": "PASS" if verified else "FAIL",
+                    "reason": reason,
+                    "extracted_id": extracted_id,
+                    "student_id": extracted_id if extracted_id else None
                 }
                 
             except Exception as e:
-                # Check for 429/ResourceExhausted or equivalent errors.APIError
                 is_429 = False
                 if isinstance(e, errors.APIError):
                     if getattr(e, "code", None) == 429 or "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e) or "ResourceExhausted" in str(e):
@@ -241,6 +259,8 @@ def verify_document(image_bytes: bytes) -> dict:
                     
     return {
         "verified": False,
+        "status": "FAIL",
         "reason": "Verification failed across all models or api keys.",
-        "extracted_id": ""
+        "extracted_id": "",
+        "student_id": None
     }
