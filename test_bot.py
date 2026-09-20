@@ -1,20 +1,35 @@
 import unittest
 from unittest.mock import patch, MagicMock, AsyncMock
 import os
+import gc
 import discord
 import bot
 import database
 
+def cleanup_bot_db(db_name: str) -> None:
+    gc.collect()
+    for name in (db_name, "test_bot_verified_students.db", "verified_students.db"):
+        for ext in ("", "-wal", "-shm"):
+            path = f"{name}{ext}"
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
 class TestBot(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         database.DB_NAME = "test_bot_verified_students.db"
-        if os.path.exists(database.DB_NAME):
-            os.remove(database.DB_NAME)
+        os.environ["HMAC_SECRET_PEPPER"] = "default_secret_pepper_for_testing_only_32_characters_long"
+        cleanup_bot_db(database.DB_NAME)
         database.init_db()
 
     def tearDown(self) -> None:
-        if os.path.exists(database.DB_NAME):
-            os.remove(database.DB_NAME)
+        cleanup_bot_db(database.DB_NAME)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cleanup_bot_db("test_bot_verified_students.db")
 
     @patch("database.init_db")
     @patch("discord.app_commands.CommandTree.sync")
@@ -70,8 +85,14 @@ class TestBot(unittest.IsolatedAsyncioTestCase):
         mock_interaction.user.roles = []
         mock_interaction.user.guild_permissions.administrator = False
         mock_interaction.response = AsyncMock()
+        mock_interaction.guild = MagicMock()
         
-        # Ensure os.environ is empty or has non-matching role
+        # Mock fetch_member to return unauthorized user
+        mock_member = MagicMock()
+        mock_member.roles = []
+        mock_member.guild_permissions.administrator = False
+        mock_interaction.guild.fetch_member = AsyncMock(return_value=mock_member)
+        
         with patch.dict(os.environ, {"SUPPORT_ROLE_ID": "9999"}):
             # Call the callback of the app command
             await bot.setup_verify.callback(mock_interaction)
@@ -155,6 +176,12 @@ class TestBot(unittest.IsolatedAsyncioTestCase):
         mock_interaction.user.roles = []
         mock_interaction.user.guild_permissions.administrator = True
         mock_interaction.response = AsyncMock()
+        mock_interaction.guild = MagicMock()
+        
+        mock_member = MagicMock()
+        mock_member.roles = []
+        mock_member.guild_permissions.administrator = True
+        mock_interaction.guild.fetch_member = AsyncMock(return_value=mock_member)
 
         # Check by user
         mock_target_user = MagicMock(spec=discord.User)
@@ -174,7 +201,12 @@ class TestBot(unittest.IsolatedAsyncioTestCase):
         mock_interaction.user.roles = []
         mock_interaction.user.guild_permissions.administrator = True
         mock_interaction.response = AsyncMock()
-        mock_interaction.guild = None
+        mock_interaction.guild = MagicMock()
+        
+        mock_member = MagicMock()
+        mock_member.roles = []
+        mock_member.guild_permissions.administrator = True
+        mock_interaction.guild.fetch_member = AsyncMock(return_value=mock_member)
 
         mock_target_user = MagicMock(spec=discord.User)
         mock_target_user.id = 123456
@@ -184,7 +216,8 @@ class TestBot(unittest.IsolatedAsyncioTestCase):
             "✅ Unlinked Student ID/User. They can now re-run verification.",
             ephemeral=True
         )
-        self.assertIsNone(database.get_student_by_discord_id(123456))
+        res = database.get_student_by_discord_id(123456)
+        self.assertIsNone(res)
 
     async def test_force_verify_command(self) -> None:
         mock_interaction = MagicMock(spec=discord.Interaction)
@@ -192,7 +225,12 @@ class TestBot(unittest.IsolatedAsyncioTestCase):
         mock_interaction.user.roles = []
         mock_interaction.user.guild_permissions.administrator = True
         mock_interaction.response = AsyncMock()
-        mock_interaction.guild = None
+        mock_interaction.guild = MagicMock()
+        
+        mock_member = MagicMock()
+        mock_member.roles = []
+        mock_member.guild_permissions.administrator = True
+        mock_interaction.guild.fetch_member = AsyncMock(return_value=mock_member)
 
         mock_target_user = MagicMock(spec=discord.User)
         mock_target_user.id = 777888
@@ -205,6 +243,83 @@ class TestBot(unittest.IsolatedAsyncioTestCase):
         res = database.get_student_by_discord_id(777888)
         self.assertIsNotNone(res)
 
+    async def test_on_message_payload_too_large(self) -> None:
+        mock_message = AsyncMock(spec=discord.Message)
+        mock_message.author = MagicMock()
+        mock_message.author.bot = False
+        mock_message.author.id = 112233
+        mock_message.guild = None
+        
+        # Simulated attachment larger than 8MB
+        mock_attachment = MagicMock()
+        mock_attachment.content_type = "image/png"
+        mock_attachment.size = 8 * 1024 * 1024 + 100 # > 8MB
+        mock_message.attachments = [mock_attachment]
+        
+        await bot.on_message(mock_message)
+        
+        # The bot should reject it immediately
+        mock_message.author.send.assert_called_with("⚠️ File too large. Maximum size is 8MB.")
+        self.assertNotIn(112233, bot.bot.processing_users)
+
+    async def test_on_message_invalid_mime_type(self) -> None:
+        mock_message = AsyncMock(spec=discord.Message)
+        mock_message.author = MagicMock()
+        mock_message.author.bot = False
+        mock_message.author.id = 445566
+        mock_message.guild = None
+        
+        # Simulated webp or pdf attachment
+        mock_attachment = MagicMock()
+        mock_attachment.content_type = "image/webp"
+        mock_attachment.size = 1000
+        mock_message.attachments = [mock_attachment]
+        
+        await bot.on_message(mock_message)
+        
+        # The bot should reject it because of invalid mime type
+        mock_message.reply.assert_called_with("❌ Invalid file. Please upload a JPG or PNG image under 8MB.")
+        self.assertNotIn(445566, bot.bot.processing_users)
+
+    async def test_audit_log_deletion_reconstruction(self) -> None:
+        # Put an audit log into the cache
+        test_msg_id = 999111
+        test_embed = discord.Embed(title="Support Audit Log: Test Log", color=discord.Color.blue())
+        bot.bot.sent_audit_logs[test_msg_id] = test_embed
+        
+        mock_deleted_message = MagicMock(spec=discord.Message)
+        mock_deleted_message.id = test_msg_id
+        mock_deleted_message.guild = MagicMock()
+        
+        mock_channel = AsyncMock()
+        mock_deleted_message.guild.get_channel.return_value = mock_channel
+        
+        # Trigger the message delete event
+        await bot.on_message_delete(mock_deleted_message)
+        
+        # Verify that the channel sent the warning alert AND recreated the embed
+        mock_channel.send.assert_called()
+        self.assertEqual(mock_channel.send.call_count, 2)
+
+    def test_magic_bytes_verification(self) -> None:
+        # Valid magic bytes
+        self.assertTrue(bot.verify_magic_bytes(b'\xFF\xD8\xFF_some_jpeg_data'))
+        self.assertTrue(bot.verify_magic_bytes(b'\x89\x50\x4E\x47\r\n\x1a\n'))
+        self.assertTrue(bot.verify_magic_bytes(b'RIFF\x00\x00\x00\x00WEBPvp8'))
+        
+        # Corrupted / fake
+        self.assertFalse(bot.verify_magic_bytes(b'GIF89a_fake_image'))
+        self.assertFalse(bot.verify_magic_bytes(b'PDF-1.4_fake_image'))
+
+    async def test_concurrency_locks(self) -> None:
+        lock1 = await bot.get_lock("user_1")
+        lock2 = await bot.get_lock("user_1")
+        # Ensure that lock1 and lock2 are the exact same instance for the same key
+        self.assertIs(lock1, lock2)
+        
+        # Test that we can acquire
+        async with lock1:
+            self.assertTrue(lock1.locked())
 
 if __name__ == "__main__":
     unittest.main()

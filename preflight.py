@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Pre-Flight Validation Script for SAI Verification Bot.
-Validates environment variables, SQLite WAL mode and database permissions,
+Validates environment variables, SQLite version, WAL mode, database permissions,
 and Gemini API key validity prior to bot startup.
 """
 
@@ -23,7 +23,7 @@ def check_env_variables() -> bool:
     """
     Validates required environment variables.
     Loads variables from .env and reference_images/.env.
-    Checks for DISCORD_TOKEN, GEMINI_API_KEY, GUILD_ID, and VERIFIED_ROLE_ID.
+    Checks for DISCORD_TOKEN, GEMINI_API_KEY, GUILD_ID, VERIFIED_ROLE_ID, and HMAC_SECRET_PEPPER.
     """
     load_dotenv(".env")
     load_dotenv("reference_images/.env")
@@ -42,8 +42,16 @@ def check_env_variables() -> bool:
         if not val or not val.strip():
             missing.append(var)
 
+    pepper = os.environ.get("HMAC_SECRET_PEPPER") or os.environ.get("APP_SECRET_PEPPER") or ""
+    if not pepper or not pepper.strip():
+        missing.append("HMAC_SECRET_PEPPER")
+
     if missing:
         logger.error(f"Missing required environment variable(s): {', '.join(missing)}")
+        return False
+
+    if len(pepper.strip()) < 32:
+        logger.error("HMAC_SECRET_PEPPER must meet minimum cryptographic entropy (>= 32 characters).")
         return False
 
     mod_log_channel = os.environ.get("MOD_LOG_CHANNEL_ID")
@@ -56,12 +64,24 @@ def check_env_variables() -> bool:
 
 def check_database() -> bool:
     """
-    Initializes database and verifies SQLite WAL mode is enabled and writable.
+    Initializes database and verifies:
+    1. SQLite version supports STRICT tables (>= 3.37.0)
+    2. SQLite WAL mode is enabled
+    3. Directory file system write permissions
     """
     try:
+        if sqlite3.sqlite_version_info < (3, 37, 0):
+            logger.error(f"SQLite version {sqlite3.sqlite_version} does not support STRICT tables (requires >= 3.37.0).")
+            return False
+
         import database
         database.init_db()
         db_name = database.DB_NAME
+
+        db_dir = os.path.dirname(os.path.abspath(db_name)) or "."
+        if not os.access(db_dir, os.W_OK):
+            logger.error(f"File system directory '{db_dir}' is not writable.")
+            return False
 
         with sqlite3.connect(db_name) as conn:
             cursor = conn.cursor()
@@ -73,13 +93,13 @@ def check_database() -> bool:
                 logger.error(f"SQLite journal_mode is '{mode}', expected 'wal'.")
                 return False
 
-            # Verify write permissions
+            # Verify write permissions by writing to a temporary test table
             cursor.execute("CREATE TABLE IF NOT EXISTS _preflight_test (id INTEGER PRIMARY KEY);")
             cursor.execute("INSERT INTO _preflight_test (id) VALUES (1) ON CONFLICT(id) DO NOTHING;")
             cursor.execute("DROP TABLE IF EXISTS _preflight_test;")
             conn.commit()
 
-        logger.info("Database WAL mode and write permissions check passed.")
+        logger.info("Database WAL mode, SQLite version, and write permissions check passed.")
         return True
     except Exception as e:
         logger.error(f"Database pre-flight check failed: {e}")

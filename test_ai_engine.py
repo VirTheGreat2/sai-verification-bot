@@ -2,10 +2,32 @@ import unittest
 from unittest.mock import patch, MagicMock
 import os
 import io
+import gc
 from PIL import Image
 import ai_engine
 
+def cleanup_ai_db() -> None:
+    gc.collect()
+    for name in ("verified_students", "test_verified_students"):
+        for ext in ("", "-wal", "-shm"):
+            path = f"{name}.db{ext}"
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
 class TestAIEngine(unittest.TestCase):
+    def setUp(self) -> None:
+        cleanup_ai_db()
+
+    def tearDown(self) -> None:
+        cleanup_ai_db()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cleanup_ai_db()
+
     def test_load_env_keys(self) -> None:
         # Create a temporary .env file for testing
         test_env_path = "test_temp.env"
@@ -73,10 +95,10 @@ class TestAIEngine(unittest.TestCase):
         mock_load_refs.return_value = []
         mock_optimize.return_value = b"optimized_bytes"
         
-        # Mock model response
+        # Mock model response conforming to new Pydantic target schema
         mock_client = MagicMock()
         mock_response = MagicMock()
-        mock_response.text = '{"verified": true, "reason": "Looks good", "extracted_id": "12345"}'
+        mock_response.text = '{"status": "PASS", "reason": "NONE", "extracted_data": {"student_name": "Test Student", "student_number": "123456789", "program_year_level": "BSCS 3rd Year", "school_year_term": "2025-2026 1st Sem"}}'
         mock_client.models.generate_content.return_value = mock_response
         mock_client_cls.return_value = mock_client
         
@@ -88,8 +110,9 @@ class TestAIEngine(unittest.TestCase):
         
         result = ai_engine.verify_document(img_bytes)
         self.assertTrue(result["verified"])
-        self.assertEqual(result["reason"], "Looks good")
-        self.assertEqual(result["extracted_id"], "12345")
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["reason"], "NONE")
+        self.assertEqual(result["extracted_id"], "123456789")
 
     @patch("ai_engine.load_reference_images")
     @patch("ai_engine.optimize_image")
@@ -108,7 +131,7 @@ class TestAIEngine(unittest.TestCase):
         ex_429 = errors.APIError(429, "RESOURCE_EXHAUSTED", "Rate limit exceeded")
         
         mock_response = MagicMock()
-        mock_response.text = '{"verified": false, "reason": "Invalid ID", "extracted_id": ""}'
+        mock_response.text = '{"status": "FAIL", "reason": "INVALID_DOCUMENT", "extracted_data": {"student_name": null, "student_number": null, "program_year_level": null, "school_year_term": null}}'
         
         mock_client.models.generate_content.side_effect = [ex_429, mock_response]
         mock_client_cls.return_value = mock_client
@@ -121,7 +144,8 @@ class TestAIEngine(unittest.TestCase):
         result = ai_engine.verify_document(img_bytes)
         
         self.assertFalse(result["verified"])
-        self.assertEqual(result["reason"], "Invalid ID")
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["reason"], "INVALID_DOCUMENT")
 
     def test_optimize_image_success(self) -> None:
         # Create a dummy 100x100 RGBA image
@@ -136,13 +160,57 @@ class TestAIEngine(unittest.TestCase):
         # Verify optimized image can be opened and is of RGB mode
         opt_img = Image.open(io.BytesIO(optimized))
         self.assertEqual(opt_img.mode, "RGB")
-        self.assertTrue(opt_img.width <= 2048)
-        self.assertTrue(opt_img.height <= 2048)
+        self.assertTrue(opt_img.width <= 2000)
+        self.assertTrue(opt_img.height <= 2000)
 
     def test_optimize_image_invalid(self) -> None:
         # Passing garbage bytes should return None
         optimized = ai_engine.optimize_image(b"not_an_image_garbage_bytes_xyz")
         self.assertIsNone(optimized)
+
+    def test_sanitize_payload_string(self) -> None:
+        # Input with null byte, control characters, Bidi override character, and zero-width space
+        malicious_input = "Hello\x00World\x1f!\u202Ereversed\u200Btext"
+        sanitized = ai_engine.sanitize_payload_string(malicious_input)
+        self.assertEqual(sanitized, "HelloWorld!reversedtext")
+
+    def test_sanitize_extracted_field(self) -> None:
+        # Input with zero-width characters and control codes
+        field_input = "\u200B\uFEFF12345\x006789\u200D"
+        sanitized = ai_engine.sanitize_extracted_field(field_input)
+        self.assertEqual(sanitized, "123456789")
+
+    @patch("ai_engine.load_reference_images")
+    @patch("ai_engine.optimize_image")
+    @patch("google.genai.Client")
+    @patch("ai_engine.get_active_flash_models")
+    def test_verify_document_prompt_injection_suspected_tampering(self, mock_get_models: MagicMock, mock_client_cls: MagicMock, mock_optimize: MagicMock, mock_load_refs: MagicMock) -> None:
+        mock_get_models.return_value = ["gemini-2.5-flash"]
+        mock_load_refs.return_value = []
+        mock_optimize.return_value = b"optimized_bytes"
+        
+        # Mock model response for a prompt injection jailbreak attempt where the model returned SUSPECTED_TAMPERING
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = '{"status": "FAIL", "reason": "SUSPECTED_TAMPERING", "extracted_data": {"student_name": null, "student_number": null, "program_year_level": null, "school_year_term": null}}'
+        mock_client.models.generate_content.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+        
+        img = Image.new("RGB", (1, 1), color="black")
+        img_bytes_io = io.BytesIO()
+        img.save(img_bytes_io, format="PNG")
+        img_bytes = img_bytes_io.getvalue()
+        
+        result = ai_engine.verify_document(img_bytes)
+        self.assertFalse(result["verified"])
+        self.assertEqual(result["status"], "FAIL")
+        self.assertEqual(result["reason"], "SUSPECTED_TAMPERING")
+
+    def test_decompression_bomb_handling(self) -> None:
+        with patch("PIL.Image.open", side_effect=Image.DecompressionBombError("Decompression bomb")):
+            res = ai_engine.verify_document(b"fake_bytes")
+            self.assertFalse(res["verified"])
+            self.assertEqual(res["reason"], "DECOMPRESSION_BOMB")
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,27 +1,42 @@
 import unittest
 from unittest.mock import patch, MagicMock
 import os
+import gc
 import sqlite3
-import sys
 import preflight
 import database
+
+def cleanup_preflight_db(db_name: str) -> None:
+    gc.collect()
+    for name in (db_name, "verified_students.db"):
+        for ext in ("", "-wal", "-shm"):
+            path = f"{name}{ext}"
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
 class TestPreflight(unittest.TestCase):
     def setUp(self) -> None:
         self.db_name = "test_preflight_verified_students.db"
         database.DB_NAME = self.db_name
-        if os.path.exists(self.db_name):
-            os.remove(self.db_name)
+        cleanup_preflight_db(self.db_name)
 
     def tearDown(self) -> None:
-        if os.path.exists(self.db_name):
-            os.remove(self.db_name)
+        cleanup_preflight_db(self.db_name)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cleanup_preflight_db("test_preflight_verified_students.db")
+        cleanup_preflight_db("verified_students.db")
 
     @patch.dict(os.environ, {
         "DISCORD_TOKEN": "mock_token",
         "GEMINI_API_KEY": "mock_gemini_key",
         "GUILD_ID": "123456789",
-        "VERIFIED_ROLE_ID": "987654321"
+        "VERIFIED_ROLE_ID": "987654321",
+        "HMAC_SECRET_PEPPER": "a_very_secure_random_string_of_at_least_32_chars_long"
     }, clear=True)
     def test_check_env_variables_success(self) -> None:
         self.assertTrue(preflight.check_env_variables())
@@ -31,7 +46,8 @@ class TestPreflight(unittest.TestCase):
         "GEMINI_API_KEY": "mock_gemini_key",
         "GUILD_ID": "123456789",
         "VERIFIED_ROLE_ID": "987654321",
-        "MOD_LOG_CHANNEL_ID": "111222333"
+        "MOD_LOG_CHANNEL_ID": "111222333",
+        "HMAC_SECRET_PEPPER": "a_very_secure_random_string_of_at_least_32_chars_long"
     }, clear=True)
     def test_check_env_variables_with_mod_log(self) -> None:
         self.assertTrue(preflight.check_env_variables())
@@ -39,7 +55,8 @@ class TestPreflight(unittest.TestCase):
     @patch("preflight.load_dotenv")
     @patch.dict(os.environ, {
         "DISCORD_TOKEN": "mock_token",
-        "GUILD_ID": "123456789"
+        "GUILD_ID": "123456789",
+        "HMAC_SECRET_PEPPER": "a_very_secure_random_string_of_at_least_32_chars_long"
     }, clear=True)
     def test_check_env_variables_missing(self, mock_load: MagicMock) -> None:
         self.assertFalse(preflight.check_env_variables())
@@ -48,7 +65,8 @@ class TestPreflight(unittest.TestCase):
         "DISCORD_TOKEN": "mock_token",
         "GEMINI_API_KEYS": "key1,key2",
         "GUILD_ID": "123456789",
-        "VERIFIED_ROLE_ID": "987654321"
+        "VERIFIED_ROLE_ID": "987654321",
+        "HMAC_SECRET_PEPPER": "a_very_secure_random_string_of_at_least_32_chars_long"
     }, clear=True)
     def test_check_env_variables_fallback_keys(self) -> None:
         self.assertTrue(preflight.check_env_variables())
@@ -106,6 +124,14 @@ class TestPreflight(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             preflight.main()
         self.assertEqual(cm.exception.code, 1)
+
+    @patch("sqlite3.sqlite_version_info", (3, 36, 0))
+    def test_sqlite_version_unsupported(self) -> None:
+        self.assertFalse(preflight.check_database())
+
+    @patch("os.access", return_value=False)
+    def test_directory_not_writable(self, mock_access: MagicMock) -> None:
+        self.assertFalse(preflight.check_database())
 
 if __name__ == "__main__":
     unittest.main()
