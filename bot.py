@@ -1,3 +1,7 @@
+import sys
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+import traceback
 import os
 import io
 import sqlite3
@@ -305,11 +309,16 @@ class VerificationBot(commands.Bot):
 
             except Exception as e:
                 # Log error and notify user via DM
-                print(f"Error in verification worker processing: {e}")
+                print(f"Error in verification worker processing: {e}", flush=True)
+                traceback.print_exc(file=sys.stdout)
+                sys.stdout.flush()
                 try:
-                    await message.reply("⚠️ Service Busy: Rate limit reached. Please try again in 5 minutes.")
+                    await message.author.send("❌ An error occurred while analyzing your document. Please try again in a few moments.")
                 except Exception:
-                    pass
+                    try:
+                        await message.reply("❌ An error occurred while analyzing your document. Please try again in a few moments.")
+                    except Exception:
+                        pass
             finally:
                 self.verification_queue.task_done()
                 self.processing_users.discard(user_id)
