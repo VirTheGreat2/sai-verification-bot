@@ -976,8 +976,14 @@ async def on_message_delete(message: discord.Message) -> None:
 
 
 if __name__ == "__main__":
-    token = os.environ.get("DISCORD_TOKEN")
-    if token:
-        bot.run(token)
-    else:
-        print("Error: DISCORD_TOKEN environment variable not set.")
+    import preflight
+    # Run gatekeeper checks prior to establishing gateway connection
+    try:
+        if not (preflight.check_env_variables() and preflight.check_database() and preflight.check_gemini_api()):
+            raise RuntimeError("Preflight validation checks failed.")
+    except Exception as e:
+        print(f"[FATAL] Preflight validation failed: {e}")
+        exit(1)
+    
+    TOKEN = os.getenv("DISCORD_TOKEN")
+    bot.run(TOKEN)

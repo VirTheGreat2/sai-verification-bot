@@ -4,7 +4,8 @@ import hmac
 import os
 from typing import Optional, Tuple, Union, Dict, Any
 
-DB_NAME = "verified_students.db"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_NAME = os.getenv("DATABASE_PATH", os.path.join(BASE_DIR, "bot.db"))
 
 def hash_student_id(raw_id: Optional[str]) -> Optional[str]:
     """
