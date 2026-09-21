@@ -7,7 +7,7 @@ import pydantic
 from PIL import Image
 
 # Enforce an absolute 8 Megapixel ceiling to prevent decompression bombs (DoS)
-Image.MAX_IMAGE_PIXELS = 8388608
+Image.MAX_IMAGE_PIXELS = 67108864  # 64 Megapixels (accommodates 12MP-50MP sensors)
 
 from google import genai
 from google.genai import types, errors
@@ -111,7 +111,7 @@ def load_reference_images(folder_path: str = "reference_images") -> List[Image.I
                 img_path = os.path.join(folder_path, filename)
                 try:
                     # Enforce Megapixel ceiling before opening
-                    Image.MAX_IMAGE_PIXELS = 8388608
+                    Image.MAX_IMAGE_PIXELS = 67108864
                     img = Image.open(img_path)
                     img.load()
                     images.append(img)
@@ -166,7 +166,7 @@ def optimize_image(image_bytes: bytes) -> Optional[bytes]:
     """
     try:
         # Enforce Megapixel ceiling and catch decompression bomb
-        Image.MAX_IMAGE_PIXELS = 8388608
+        Image.MAX_IMAGE_PIXELS = 67108864  # 64 Megapixels
         img = Image.open(io.BytesIO(image_bytes))
         img.load()
     except Image.DecompressionBombError as dbe:
@@ -198,7 +198,7 @@ def verify_document(image_bytes: bytes) -> dict:
     """
     try:
         # Enforce Megapixel ceiling and catch decompression bomb
-        Image.MAX_IMAGE_PIXELS = 8388608
+        Image.MAX_IMAGE_PIXELS = 67108864
         user_image = Image.open(io.BytesIO(image_bytes))
         user_image.load()
     except Image.DecompressionBombError as dbe:

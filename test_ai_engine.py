@@ -212,5 +212,28 @@ class TestAIEngine(unittest.TestCase):
             self.assertFalse(res["verified"])
             self.assertEqual(res["reason"], "DECOMPRESSION_BOMB")
 
+    def test_decompression_bomb_exceeds_max_pixels(self) -> None:
+        # 12000 x 12000 = 144,000,000 pixels (> 2 * 67,108,864 = 134,217,728) or DecompressionBombWarning
+        large_img = Image.new("RGB", (12000, 12000), color="white")
+        buf = io.BytesIO()
+        large_img.save(buf, format="JPEG")
+        raw_bytes = buf.getvalue()
+
+        with self.assertRaises((Image.DecompressionBombError, Image.DecompressionBombWarning)):
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                ai_engine.optimize_image(raw_bytes)
+
+    def test_realistic_camera_resolution_passes_decompression_check(self) -> None:
+        # 4032 x 3024 = 12,192,768 pixels (realistic 12MP camera photo)
+        cam_img = Image.new("RGB", (4032, 3024), color="blue")
+        buf = io.BytesIO()
+        cam_img.save(buf, format="JPEG")
+        raw_bytes = buf.getvalue()
+
+        optimized = ai_engine.optimize_image(raw_bytes)
+        self.assertIsNotNone(optimized)
+
 if __name__ == "__main__":
     unittest.main()

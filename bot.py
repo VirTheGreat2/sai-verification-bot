@@ -7,8 +7,8 @@ import discord
 import hashlib
 from PIL import Image
 
-# Enforce an absolute 8 Megapixel ceiling to prevent decompression bombs (DoS)
-Image.MAX_IMAGE_PIXELS = 8388608
+# Enforce an absolute 64 Megapixel ceiling to prevent decompression bombs (DoS)
+Image.MAX_IMAGE_PIXELS = 67108864
 
 from discord.ext import commands
 from discord import app_commands
@@ -23,7 +23,7 @@ load_dotenv(".env")
 load_dotenv("reference_images/.env")
 
 # Production Constants - Hardened: Max size is 8MB (8388608 bytes)
-MAX_FILE_SIZE = 8388608
+MAX_FILE_SIZE = 26214400  # 25MB (25 * 1024 * 1024 bytes)
 
 # Module level queue for backward compatibility with existing tests
 verification_queue = asyncio.Queue()
@@ -913,10 +913,10 @@ async def on_message(message: discord.Message) -> None:
     # Pre-download check: Inspect attachment.size against 8MB limit
     if attachment.size > MAX_FILE_SIZE:
         try:
-            await message.author.send("⚠️ File too large. Maximum size is 8MB.")
+            await message.author.send("⚠️ File too large. Maximum size is 25MB.")
         except Exception:
             try:
-                await message.reply("⚠️ File too large. Maximum size is 8MB.")
+                await message.reply("⚠️ File too large. Maximum size is 25MB.")
             except Exception:
                 pass
         return

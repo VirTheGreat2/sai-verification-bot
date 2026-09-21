@@ -250,17 +250,38 @@ class TestBot(unittest.IsolatedAsyncioTestCase):
         mock_message.author.id = 112233
         mock_message.guild = None
         
-        # Simulated attachment larger than 8MB
+        # Simulated attachment larger than 25MB
         mock_attachment = MagicMock()
         mock_attachment.content_type = "image/png"
-        mock_attachment.size = 8 * 1024 * 1024 + 100 # > 8MB
+        mock_attachment.size = 26214401 # > 25MB
         mock_message.attachments = [mock_attachment]
         
         await bot.on_message(mock_message)
         
         # The bot should reject it immediately
-        mock_message.author.send.assert_called_with("⚠️ File too large. Maximum size is 8MB.")
+        mock_message.author.send.assert_called_with("⚠️ File too large. Maximum size is 25MB.")
         self.assertNotIn(112233, bot.bot.processing_users)
+
+    async def test_on_message_payload_boundary_accepted(self) -> None:
+        mock_message = AsyncMock(spec=discord.Message)
+        mock_message.author = MagicMock()
+        mock_message.author.bot = False
+        mock_message.author.id = 112234
+        mock_message.guild = None
+        
+        # Simulated attachment exactly equal to 25MB (26214400 bytes)
+        mock_attachment = MagicMock()
+        mock_attachment.content_type = "image/png"
+        mock_attachment.size = 26214400 # <= 25MB
+        mock_message.attachments = [mock_attachment]
+        
+        await bot.on_message(mock_message)
+        
+        self.assertIn(112234, bot.bot.processing_users)
+        queued_item = bot.verification_queue.get_nowait()
+        self.assertEqual(queued_item, mock_message)
+        bot.verification_queue.task_done()
+        bot.bot.processing_users.discard(112234)
 
     async def test_on_message_invalid_mime_type(self) -> None:
         mock_message = AsyncMock(spec=discord.Message)
